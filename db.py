@@ -1,30 +1,122 @@
-import sqlite3, json
+"""Registry-driven storage.
 
-DB = "receipts.db"
+- `doc_types`  : the registry. One row per known document type (the schema).
+- `documents`  : uniform storage. Every extracted document is a JSON payload
+                 tagged with its type. No per-type row schema, so evolving a
+                 type never requires a destructive migration.
+- `view_<type>`: a SQL view per type that projects the JSON fields as real
+                 columns, so each type stays cleanly queryable.
+"""
 
-def init_db():
-    con = sqlite3.connect(DB)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS receipts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            store TEXT, date TEXT, total REAL,
-            currency TEXT, items_json TEXT
-        )""")
-    con.commit(); con.close()
+import json
+import sqlite3
 
-def insert_receipt(r):
-    con = sqlite3.connect(DB)
-    con.execute(
-        "INSERT INTO receipts (store, date, total, currency, items_json) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (r.store, r.date, r.total, r.currency,
-         json.dumps([i.model_dump() for i in r.items])),
-    )
-    con.commit(); con.close()
+from schema import FieldSpec, slug
 
-def run_query(sql):
+DB = "documents.db"
+
+
+def _connect():
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
+    return con
+
+
+def init_db():
+    con = _connect()
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS doc_types (
+            name        TEXT PRIMARY KEY,
+            description TEXT,
+            fields_json TEXT NOT NULL,
+            created_at  TEXT DEFAULT (datetime('now'))
+        )""")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_type    TEXT NOT NULL REFERENCES doc_types(name),
+            source_name TEXT,
+            extracted_at TEXT DEFAULT (datetime('now')),
+            data_json   TEXT NOT NULL
+        )""")
+    con.commit()
+    con.close()
+
+
+# --- registry -------------------------------------------------------------
+
+def list_types() -> list[dict]:
+    con = _connect()
+    rows = con.execute(
+        "SELECT name, description, fields_json FROM doc_types ORDER BY name"
+    ).fetchall()
+    con.close()
+    return [
+        {"name": r["name"],
+         "description": r["description"],
+         "fields": [FieldSpec(**f) for f in json.loads(r["fields_json"])]}
+        for r in rows
+    ]
+
+
+def get_type(name: str) -> dict | None:
+    for t in list_types():
+        if t["name"] == name:
+            return t
+    return None
+
+
+def type_exists(name: str) -> bool:
+    return get_type(slug(name)) is not None
+
+
+def register_type(name: str, description: str, fields: list[FieldSpec]) -> str:
+    """Add a new document type to the registry and create its view. Idempotent."""
+    name = slug(name)
+    con = _connect()
+    con.execute(
+        "INSERT OR IGNORE INTO doc_types (name, description, fields_json) "
+        "VALUES (?, ?, ?)",
+        (name, description, json.dumps([f.model_dump() for f in fields])),
+    )
+    con.commit()
+    con.close()
+    _rebuild_view(name, fields)
+    return name
+
+
+def _rebuild_view(name: str, fields: list[FieldSpec]):
+    cols = ", ".join(
+        f"json_extract(data_json, '$.{slug(f.name)}') AS {slug(f.name)}"
+        for f in fields
+    )
+    con = _connect()
+    con.execute(f'DROP VIEW IF EXISTS "view_{name}"')
+    con.execute(
+        f'CREATE VIEW "view_{name}" AS '
+        f"SELECT id, source_name, extracted_at{', ' + cols if cols else ''} "
+        f"FROM documents WHERE doc_type = '{name}'"
+    )
+    con.commit()
+    con.close()
+
+
+# --- documents ------------------------------------------------------------
+
+def insert_document(doc_type: str, source_name: str, data: dict) -> int:
+    con = _connect()
+    cur = con.execute(
+        "INSERT INTO documents (doc_type, source_name, data_json) VALUES (?, ?, ?)",
+        (slug(doc_type), source_name, json.dumps(data)),
+    )
+    con.commit()
+    new_id = cur.lastrowid
+    con.close()
+    return new_id
+
+
+def run_query(sql: str) -> list[dict]:
+    con = _connect()
     rows = con.execute(sql).fetchall()
     con.close()
-    return [dict(x) for x in rows]
+    return [dict(r) for r in rows]

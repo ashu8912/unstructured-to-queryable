@@ -7,7 +7,7 @@ __pycache__/
 .venv/
 
 # Local data
-receipts.db
+*.db
 
 # Agent/editor tooling
 .agents/

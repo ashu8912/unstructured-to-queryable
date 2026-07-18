@@ -1,25 +1,29 @@
-import os
-from google import genai
+"""Phase 2: extract fields for a known type.
+
+The type's schema (its FieldSpecs) is turned into a Pydantic model and passed as
+response_schema, so the model fills *our* boxes instead of free-forming JSON.
+"""
+
 from google.genai import types
-from dotenv import load_dotenv
-from schema import Receipt
 
-load_dotenv()
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+from llm import client, MODEL
+from schema import FieldSpec, build_model
 
-MODEL = "gemini-flash-latest"   # confirm the current free Flash id in AI Studio
 
-def extract_receipt(file_bytes: bytes, mime_type: str) -> Receipt:
+def extract_document(file_bytes: bytes, mime_type: str,
+                     type_name: str, fields: list[FieldSpec]) -> dict:
+    model_cls = build_model(type_name, fields)
+    field_hint = ", ".join(f"{f.name} ({f.type})" for f in fields)
     resp = client.models.generate_content(
         model=MODEL,
         contents=[
             types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-            "Extract the receipt fields. Use YYYY-MM-DD for the date. "
-            "Return null for any field you can't find.",
+            f"Extract these fields: {field_hint}. "
+            "Use YYYY-MM-DD for dates. Return null for anything you can't find.",
         ],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=Receipt,
+            response_schema=model_cls,
         ),
     )
-    return Receipt.model_validate_json(resp.text)
+    return model_cls.model_validate_json(resp.text).model_dump()
