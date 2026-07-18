@@ -1,31 +1,47 @@
 # unstructured-to-queryable
 
-> Turn a shoebox of receipts into a table you can ask questions.
+> Turn any pile of documents into tables you can ask questions.
 
-Drop in a receipt (image or PDF), and this pipeline reads it, forces the output
-into a fixed schema, stores it in SQLite, and lets you query it with SQL — no
-OCR engine, no GPU, no manual data entry.
+Drop in a document (image or PDF). The pipeline figures out **what kind of
+document it is**, extracts it into that type's schema, stores it in SQLite, and
+lets you query it with SQL — no OCR engine, no GPU, no manual data entry. New
+document types are learned on the fly and added to a registry.
 
 ```
- upload  ─▶  extract  ─▶  store  ─▶  query
- (image/    (schema-      (SQLite)   (SQL over
-  PDF)       forced LLM)              your rows)
+ upload  ─▶  classify  ─▶  extract  ─▶  store  ─▶  query
+ (image/    (match a       (schema-     (SQLite    (SQL over
+  PDF)       known type     forced LLM)  + views)   per-type
+             or propose                             columns)
+             a new one)
 ```
 
 ---
 
 ## Why
 
-Receipts are **semi-structured**: every one has a store, a date, and a total —
-but the layout changes per vendor, so a computer can't reliably find them. This
-project builds the machine that takes that messy, human-readable input and turns
-it into clean, **queryable** rows.
+Most documents are **semi-structured**: a receipt always has a store, a date,
+and a total — but the layout changes per vendor, so a computer can't reliably
+find them. This project builds the machine that takes that messy, human-readable
+input and turns it into clean, **queryable** rows — for *any* document type, not
+just one.
 
-- **Unstructured** — a photo of a receipt; information with no consistent place.
-- **Schema** — the labeled boxes you decide on: `store`, `date`, `amount`.
+- **Unstructured** — a photo of a document; information with no consistent place.
+- **Schema** — the labeled boxes for a type: e.g. `store`, `date`, `amount`.
 - **Structured** — the data poured into that neat, labeled table.
 - **Queryable** — you can now ask *"show me every receipt over $40"* and get an
   instant answer.
+
+### How it stays unambiguous
+
+- A **registry** (`doc_types`) is the source of truth for known types. The
+  classifier is grounded in it, so it matches real types instead of inventing
+  near-duplicates.
+- **Two phases:** classify *what* a document is, then extract its fields — two
+  separate jobs, kept separate.
+- **New types are gated** by a confidence threshold and your confirmation, so
+  the table list doesn't sprawl.
+- Rows are stored as **JSON + a per-type SQL view**, so a type can evolve
+  without a destructive migration.
 
 ---
 
@@ -46,12 +62,14 @@ it into clean, **queryable** rows.
 
 | File            | Role                                                        |
 | --------------- | ----------------------------------------------------------- |
-| `schema.py`     | The `Receipt` schema — the contract everything else obeys   |
-| `extract.py`    | Unstructured file → structured `Receipt` (schema-forced)    |
-| `db.py`         | SQLite storage + query helpers                              |
-| `app.py`        | Streamlit UI: upload, extract, browse, query                |
+| `schema.py`     | Field types + dynamic Pydantic model builder                |
+| `classify.py`   | Phase 1: classify a document against the registry           |
+| `extract.py`    | Phase 2: extract fields for the chosen type (schema-forced) |
+| `db.py`         | Registry, JSON storage, and per-type SQL views              |
+| `llm.py`        | Shared Gemini client + model id                             |
+| `app.py`        | Streamlit UI: upload, classify, confirm, browse, query      |
 | `list_models.py`| Helper to list available Gemini models                      |
-| `decisions.md`  | Scope, stack, and risk decisions for the build              |
+| `decisions.md`  | Scope, architecture, and risk decisions                     |
 
 ---
 
@@ -80,7 +98,7 @@ GEMINI_API_KEY=paste_your_key_here
 python list_models.py
 ```
 
-Drop a current Flash id into the `MODEL` constant in `extract.py` if needed.
+Drop a current Flash id into the `MODEL` constant in `llm.py` if needed.
 
 **5. Run the app**
 
@@ -92,39 +110,40 @@ streamlit run app.py
 
 ## Usage
 
-1. Upload a receipt (`.pdf`, `.png`, `.jpg`).
-2. Click **Extract** — the model fills the schema and the row is saved.
-3. Browse your receipts in the table.
-4. Ask questions with a SQL `WHERE` clause, e.g. `total > 40`.
+1. Upload a document (`.pdf`, `.png`, `.jpg`).
+2. Click **Analyze** — it's classified against known types.
+3. If it matches a known type confidently, it's extracted and saved. If it's a
+   new type (or a low-confidence match), you're shown the proposed schema and
+   confirm before the type is created.
+4. Browse each type's rows, or ask questions with a SQL `WHERE` clause.
 
 ---
 
-## Schema
+## Schema model
 
-```python
-class LineItem(BaseModel):
-    description: str
-    amount: float
+Each document type is a list of fields, each one of:
 
-class Receipt(BaseModel):
-    store: Optional[str] = None
-    date: Optional[str] = None        # YYYY-MM-DD
-    total: Optional[float] = None
-    currency: Optional[str] = None
-    items: list[LineItem] = []
-```
+| Field type | Stored as        |
+| ---------- | ---------------- |
+| `string`   | text             |
+| `number`   | float            |
+| `integer`  | int              |
+| `boolean`  | bool             |
+| `date`     | ISO `YYYY-MM-DD` |
+| `list`     | list of strings  |
 
-All top-level fields are optional so the model returns `null` instead of
-hallucinating a value it can't find.
+Types live in the `doc_types` registry; rows live in one `documents` table as
+JSON, and each type gets a `view_<type>` exposing its fields as columns.
 
 ---
 
 ## Roadmap
 
-- [ ] Validate extracted values (parse dates, enforce `total >= 0`)
+- [ ] Registry merge/rename tool to curate types
+- [ ] Value validation (parse dates, enforce numeric ranges)
 - [ ] Natural-language → SQL query box (replace raw `WHERE` input)
-- [ ] Normalize line items into their own queryable table
-- [ ] Generalize beyond receipts to invoices and forms
+- [ ] Nested/structured children (e.g. line items with per-item amounts)
+- [ ] Schema evolution / re-extraction when a type gains fields
 
 ---
 
