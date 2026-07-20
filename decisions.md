@@ -119,7 +119,8 @@ ambiguous and produces sprawl. The corrections:
 - The registry passed into Phase 1 is what keeps the model from hallucinating a
   match — it can only match types that actually exist.
 
-**Flow:** `upload → classify → (confirm if new / low-confidence) → extract → store → query`.
+**Flow:** `upload → classify → (confirm if new / low-confidence) → extract →
+review & edit → store → explore / ask`.
 
 ### 3.5 New types are gated by confidence + human confirmation
 
@@ -188,12 +189,58 @@ if concurrency or scale demands it.
 
 ### 3.9 Streamlit for the UI
 
-**Decision:** Streamlit.
+**Decision:** A **multi-page Streamlit app** (`st.navigation`) with pages for
+Extract, Explore, Ask, and Types.
 
-**Why:** File upload, tables, buttons, and a query box with almost no frontend
-code. It lets the whole left-to-right journey be demoed and driven by a
-non-developer. The cost is less control over UX and a websocket-based runtime
-(which shaped the deployment, see §5).
+**Why:** File upload, tables, forms, and charts with almost no frontend code, and
+`st.navigation` keeps each concern on its own page. The cost is less control over
+UX and a websocket-based runtime (which shaped the deployment, see §5).
+
+### 3.10 Human-in-the-loop review before save
+
+**Decision:** Extraction results are shown in an **editable form**; nothing is
+stored until the user confirms.
+
+**Why:** Schema-forcing guarantees shape, not correctness (§3.2). For a
+finance-adjacent product, a misread total is worse than a slower flow. The review
+step turns the model into a *draft* the human approves — accuracy and
+auditability over blind automation. On save, the user is routed to Explore with a
+confirmation toast so the result is immediately visible.
+
+### 3.11 Natural-language querying, guarded
+
+**Decision:** The "Ask" page turns a plain-English question into SQL via the LLM,
+grounded in the chosen type's view schema, then runs it.
+
+**Why / how it's safe:** This delivers the "queryable" promise for non-technical
+users *and* removes the earlier raw-`WHERE` injection surface. Two layers:
+1. A guard rejects anything that isn't a single `SELECT`/`WITH` (keyword
+   blocklist, no multiple statements).
+2. Execution goes through a **physically read-only** SQLite connection
+   (`mode=ro`), so even a bypass can't mutate data.
+The generated SQL is shown to the user before results, for trust.
+
+### 3.12 Resilient LLM layer
+
+**Decision:** All model calls go through one `generate()` wrapper with retry +
+backoff, **model fallback** on rate limits, and a friendly error type.
+
+**Why:** The free Gemini tier throttles (`429`) and has transient outages
+(`503`). The wrapper retries transient errors with exponential backoff and, when
+rate-limited, falls back across models (`GEMINI_MODEL` → `GEMINI_FALLBACK_MODELS`,
+each with separate quota). If everything fails it raises `ModelUnavailable` with
+a human message, rendered as a calm error box instead of a traceback. **Honest
+limit:** fallback only *delays* free-tier caps — billing is the real fix.
+
+### 3.13 Zamp-style visual design
+
+**Decision:** A themed look (warm off-white canvas, near-black text, black pill
+buttons, dark sidebar, Space Grotesk headings, accent-bar heroes) via
+`.streamlit/config.toml` plus a small `ui.py` CSS layer.
+
+**Why:** The app is a portfolio/eval piece; matching Zamp's precise, minimal
+aesthetic signals product polish. Native theming does the heavy lifting; CSS is
+kept minimal and used only because a specific brand look was requested.
 
 ---
 
@@ -225,6 +272,8 @@ Target: a Hostinger VPS (Ubuntu), served at `https://ashughildiyal.cloud`.
 | Reverse proxy | **nginx** → `127.0.0.1:8501` | App never binds public ports directly; nginx terminates TLS and handles the domain |
 | Websockets | nginx `Upgrade`/`Connection` headers + long `proxy_read_timeout` | Streamlit is websocket-driven; without this the UI silently fails to update |
 | TLS | **Let's Encrypt** via certbot, HTTP→HTTPS redirect | Free, auto-renewing certs; redirect makes HTTPS the only surface |
+| Uploads | nginx `client_max_body_size 50M` + Streamlit `maxUploadSize=50` | Both layers agree, so the UI never promises a size nginx would reject (413) |
+| Updates | in-place `git reset --hard origin/main` + `pip upgrade` + restart | Preserves `.env` and `documents.db` (git-ignored); no re-clone, no data loss |
 | Secrets | `.env` on the server, `git`-ignored, `umask 077` | API key never enters the repo, chat, or shell history |
 
 **Deployment complexities actually hit (and how they were resolved):**
@@ -247,6 +296,12 @@ Target: a Hostinger VPS (Ubuntu), served at `https://ashughildiyal.cloud`.
   the site so it answers on both stacks, then re-run certbot. **Lesson:** if a
   domain has an AAAA record, every public-facing server block must listen on
   IPv6 too, or ACME (and real IPv6 users) hit the wrong vhost.
+- **Destructive deploy wiped the app dir + database.** The first `deploy.sh` did
+  `rm -rf $APP` before cloning, so an interrupted re-run deleted everything
+  (including the SQLite DB) while the old process kept serving from now-missing
+  files (a 500 on `/`, but a healthy `/_stcore/health`). **Lesson:** deploys must
+  be **in-place and non-destructive** (`git reset`), and the database must live
+  outside the re-cloned tree — or at least be git-ignored and never `rm`-ed.
 
 ---
 
@@ -258,11 +313,12 @@ Target: a Hostinger VPS (Ubuntu), served at `https://ashughildiyal.cloud`.
 | Model matches a type it shouldn't | Low-confidence matches require confirmation | Mitigated |
 | Field the model can't find | All fields optional → returns `null` instead of inventing | Handled |
 | Type gains a field later | JSON storage + regenerated view; old rows read `null` | Handled (no re-extraction yet) |
-| Wrong value in the right field (misread) | — | **Open:** no value validation yet |
-| Malicious SQL in the query box | — | **Open:** raw `WHERE` is trusted (single-user, local) |
+| Wrong value in the right field (misread) | Human-in-the-loop review/edit before save | Mitigated |
+| User query in "Ask" | LLM → SELECT-only guard + read-only connection | Handled |
+| Model rate limit / outage | Retry + backoff + model fallback; friendly error box | Mitigated (free-tier caps remain) |
 | Casing/spacing variants of a type name | Deterministic slugging | Handled |
 | Nested/structured children (line items) | — | **Out of scope for v1** |
-| Model/API id drift | `MODEL` constant, confirmable via `list_models.py` | Handled operationally |
+| Model/API id drift | `GEMINI_MODEL` env + `list_models.py` | Handled operationally |
 
 ---
 
@@ -271,18 +327,19 @@ Target: a Hostinger VPS (Ubuntu), served at `https://ashughildiyal.cloud`.
 - **Secrets never in the repo or in git history** — `.env` is git-ignored;
   storage DBs (`*.db`) are ignored too.
 - **On the server**, the key lives only in `/opt/.../.env` with tight perms.
-- **Known weak point:** the query UI passes a user-supplied SQL `WHERE` clause
-  straight to SQLite. This is acceptable for a **single-user, local/trusted**
-  deployment but is an injection surface and **must not** be exposed to
-  untrusted users. The intended fix is a natural-language → validated-SQL layer,
-  or a parameterized query builder that never lets raw SQL through.
+- **Querying is guarded:** the "Ask" page's LLM-generated SQL is constrained to a
+  single `SELECT` and executed over a **read-only** connection, so it can't
+  mutate data. Still single-user — review the shown SQL before trusting results.
+- **Remaining gap:** no auth yet, so it shouldn't hold sensitive data until
+  multi-user isolation is added.
 
 ---
 
 ## 8. Known limitations & risks
 
-- **Extraction correctness is unvalidated** beyond field *types*. Dates aren't
-  parsed, numbers aren't range-checked. A confidently wrong total is stored as-is.
+- **Extraction correctness is unvalidated** beyond field *types* — dates aren't
+  parsed, numbers aren't range-checked. The **review step** lets a human catch
+  misreads before saving, but there's no automated validation yet.
 - **Type sprawl is reduced, not solved.** A human can still confirm a bad new
   type. A registry **merge/rename** tool is needed to curate over time.
 - **No schema evolution flow.** Adding a field doesn't re-extract historical
@@ -297,13 +354,11 @@ Target: a Hostinger VPS (Ubuntu), served at `https://ashughildiyal.cloud`.
 
 1. **Value validation** — parse dates, enforce numeric ranges, flag low-confidence
    *field-level* extractions (not just type-level).
-2. **Registry curation** — merge/rename/deprecate types; view the type graph.
-3. **Safe querying** — replace the raw `WHERE` box with natural-language → SQL or
-   a constrained query builder.
-4. **Nested types** — model structured children (line items) via child tables.
-5. **Schema evolution** — offer re-extraction when a type gains fields.
-6. **Multi-user hardening** — auth, per-user data isolation, and moving off raw
-   SQL before exposing publicly.
+2. **Registry curation** — merge/rename types (delete already exists); type graph.
+3. **Nested types** — model structured children (line items) via child tables.
+4. **Schema evolution** — offer re-extraction when a type gains fields.
+5. **Multi-user hardening** — auth and per-user data isolation before real data.
+6. **Remove rate-limit caps** — enable Gemini billing (fallback only delays them).
 
 ---
 

@@ -10,12 +10,16 @@ lets you query it with SQL — no OCR engine, no GPU, no manual data entry. New
 document types are learned on the fly and added to a registry.
 
 ```
- upload  ─▶  classify  ─▶  extract  ─▶  store  ─▶  query
- (image/    (match a       (schema-     (SQLite    (SQL over
-  PDF)       known type     forced LLM)  + views)   per-type
-             or propose                             columns)
+ upload  ─▶  classify  ─▶  extract  ─▶  review  ─▶  store  ─▶  ask
+ (image/    (match a       (schema-     (edit      (SQLite    (plain English
+  PDF)       known type     forced LLM)  before     + views)   → read-only
+             or propose                  saving)               SQL)
              a new one)
 ```
+
+A polished, **Zamp-styled multi-page app**: extract with a human-in-the-loop
+review step, explore your data with KPIs and charts, and query it in plain
+English.
 
 ---
 
@@ -47,6 +51,20 @@ just one.
 
 ---
 
+## Features
+
+- **Multi-page UI** (`st.navigation`): Extract · Explore · Ask · Types.
+- **Human-in-the-loop review** — edit every extracted field before it's saved.
+- **Ask your data** — plain-English questions become a **read-only** SQL query
+  (guarded: SELECT-only + a physically read-only connection), shown before it
+  runs.
+- **Explore** — KPI cards, per-type tables, a group-by chart, and CSV export.
+- **Registry management** — view learned types and delete them (with confirm).
+- **Resilient LLM layer** — retry with backoff, automatic model fallback on rate
+  limits, and friendly error messages instead of tracebacks.
+
+---
+
 ## Stack
 
 | Piece        | Choice                      | Why                                        |
@@ -62,16 +80,20 @@ just one.
 
 ## Project layout
 
-| File            | Role                                                        |
-| --------------- | ----------------------------------------------------------- |
-| `schema.py`     | Field types + dynamic Pydantic model builder                |
-| `classify.py`   | Phase 1: classify a document against the registry           |
-| `extract.py`    | Phase 2: extract fields for the chosen type (schema-forced) |
-| `db.py`         | Registry, JSON storage, and per-type SQL views              |
-| `llm.py`        | Shared Gemini client + model id                             |
-| `app.py`        | Streamlit UI: upload, classify, confirm, browse, query      |
-| `list_models.py`| Helper to list available Gemini models                      |
-| `decisions.md`  | Scope, architecture, and risk decisions                     |
+| File                | Role                                                        |
+| ------------------- | ----------------------------------------------------------- |
+| `app.py`            | Entry point: `st.navigation` + shared setup                 |
+| `app_pages/`        | Pages: `extract`, `explore`, `ask`, `types`                 |
+| `schema.py`         | Field types + dynamic Pydantic model builder                |
+| `classify.py`       | Phase 1: classify a document against the registry           |
+| `extract.py`        | Phase 2: extract fields for the chosen type (schema-forced) |
+| `ask.py`            | Natural-language → guarded read-only SQL                    |
+| `db.py`             | Registry, JSON storage, per-type SQL views, read-only query |
+| `llm.py`            | Gemini client + retry/backoff + model fallback              |
+| `ui.py`             | Zamp-style theme helpers (hero, error box)                  |
+| `.streamlit/config.toml` | Theme + 50MB upload cap                                |
+| `list_models.py`    | Helper to list available Gemini models                      |
+| `decisions.md`      | Scope, architecture, and risk decisions                     |
 
 ---
 
@@ -100,7 +122,12 @@ GEMINI_API_KEY=paste_your_key_here
 python list_models.py
 ```
 
-Drop a current Flash id into the `MODEL` constant in `llm.py` if needed.
+Set the model via env if needed (in `.env`), plus optional rate-limit fallbacks:
+
+```
+GEMINI_MODEL=gemini-flash-latest
+GEMINI_FALLBACK_MODELS=gemini-2.0-flash,gemini-2.0-flash-lite
+```
 
 **5. Run the app**
 
@@ -112,12 +139,15 @@ streamlit run app.py
 
 ## Usage
 
-1. Upload a document (`.pdf`, `.png`, `.jpg`).
-2. Click **Analyze** — it's classified against known types.
-3. If it matches a known type confidently, it's extracted and saved. If it's a
-   new type (or a low-confidence match), you're shown the proposed schema and
-   confirm before the type is created.
-4. Browse each type's rows, or ask questions with a SQL `WHERE` clause.
+1. **Extract** — upload a document (`.pdf`, `.png`, `.jpg`) and click *Analyze*.
+   It's classified against known types (with a confidence score); new or
+   low-confidence types are shown for confirmation.
+2. **Review** — the model fills the fields; correct anything, then *Save*. You're
+   taken to Explore with a confirmation toast.
+3. **Explore** — browse each type's rows, see KPIs and a chart, export CSV.
+4. **Ask** — ask a question in plain English; inspect the generated read-only
+   SQL and its results.
+5. **Types** — review the registry and delete types you no longer want.
 
 ---
 
@@ -143,14 +173,17 @@ JSON, and each type gets a `view_<type>` exposing its fields as columns.
 
 - [ ] Registry merge/rename tool to curate types
 - [ ] Value validation (parse dates, enforce numeric ranges)
-- [ ] Natural-language → SQL query box (replace raw `WHERE` input)
 - [ ] Nested/structured children (e.g. line items with per-item amounts)
 - [ ] Schema evolution / re-extraction when a type gains fields
+- [ ] Multi-user auth + per-user data isolation
 
 ---
 
 ## Notes & limitations
 
-- The query box passes a raw SQL `WHERE` clause to SQLite — fine for a local,
-  single-user build, **not** safe to expose publicly.
-- Extraction quality depends on the model; always spot-check results.
+- **Ask** generates SQL via the LLM; it's constrained to a single `SELECT` and
+  run over a read-only connection, but review the shown SQL before trusting it.
+- The free Gemini tier has rate limits; the app retries and falls back across
+  models, but enabling billing is the only way to fully remove the caps.
+- Extraction quality depends on the model; the review step exists to catch
+  mistakes before saving.
