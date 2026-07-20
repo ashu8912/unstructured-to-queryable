@@ -1,0 +1,26 @@
+[server]
+# Match the nginx client_max_body_size (50M) so the uploader advertises 50MB.
+maxUploadSize = 50
+
+[theme]
+base = "light"
+primaryColor = "#111114"
+backgroundColor = "#EFEEEA"
+secondaryBackgroundColor = "#F7F6F2"
+textColor = "#0B0B0C"
+borderColor = "#DEDCD4"
+linkColor = "#111114"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+headingFont = "Space Grotesk:https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap"
+baseFontSize = 15
+baseRadius = "14px"
+buttonRadius = "full"
+linkUnderline = false
+showWidgetBorder = true
+
+[theme.sidebar]
+backgroundColor = "#0B0B0C"
+secondaryBackgroundColor = "#161618"
+textColor = "#EDEBE6"
+primaryColor = "#EDEBE6"
+borderColor = "#232326"
