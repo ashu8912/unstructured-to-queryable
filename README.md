@@ -2,6 +2,8 @@
 
 > Turn any pile of documents into tables you can ask questions.
 
+**🌐 Live:** [ashughildiyal.cloud](https://ashughildiyal.cloud)
+
 Drop in a document (image or PDF). The pipeline figures out **what kind of
 document it is**, extracts it into that type's schema, stores it in SQLite, and
 lets you query it with SQL — no OCR engine, no GPU, no manual data entry. New
