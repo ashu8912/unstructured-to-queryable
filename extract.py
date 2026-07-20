@@ -6,7 +6,7 @@ response_schema, so the model fills *our* boxes instead of free-forming JSON.
 
 from google.genai import types
 
-from llm import client, MODEL
+from llm import generate
 from schema import FieldSpec, build_model
 
 
@@ -14,8 +14,7 @@ def extract_document(file_bytes: bytes, mime_type: str,
                      type_name: str, fields: list[FieldSpec]) -> dict:
     model_cls = build_model(type_name, fields)
     field_hint = ", ".join(f"{f.name} ({f.type})" for f in fields)
-    resp = client.models.generate_content(
-        model=MODEL,
+    resp = generate(
         contents=[
             types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
             f"Extract these fields: {field_hint}. "

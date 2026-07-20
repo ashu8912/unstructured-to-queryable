@@ -120,3 +120,43 @@ def run_query(sql: str) -> list[dict]:
     rows = con.execute(sql).fetchall()
     con.close()
     return [dict(r) for r in rows]
+
+
+def run_query_readonly(sql: str) -> list[dict]:
+    """Execute a query over a physically read-only connection (defense in depth)."""
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(sql).fetchall()
+    finally:
+        con.close()
+    return [dict(r) for r in rows]
+
+
+# --- metrics & curation ---------------------------------------------------
+
+def total_documents() -> int:
+    con = _connect()
+    n = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    con.close()
+    return n
+
+
+def type_counts() -> dict[str, int]:
+    con = _connect()
+    rows = con.execute(
+        "SELECT doc_type AS name, COUNT(*) AS n FROM documents GROUP BY doc_type"
+    ).fetchall()
+    con.close()
+    return {r["name"]: r["n"] for r in rows}
+
+
+def delete_type(name: str) -> None:
+    """Remove a type, its view, and all its documents. Destructive."""
+    name = slug(name)
+    con = _connect()
+    con.execute(f'DROP VIEW IF EXISTS "view_{name}"')
+    con.execute("DELETE FROM documents WHERE doc_type = ?", (name,))
+    con.execute("DELETE FROM doc_types WHERE name = ?", (name,))
+    con.commit()
+    con.close()

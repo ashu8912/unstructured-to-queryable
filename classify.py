@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel
 from google.genai import types
 
-from llm import client, MODEL
+from llm import generate
 from schema import FieldSpec
 
 
@@ -35,8 +35,7 @@ def _registry_prompt(registry: list[dict]) -> str:
 
 
 def classify_document(file_bytes: bytes, mime_type: str, registry: list[dict]) -> Decision:
-    resp = client.models.generate_content(
-        model=MODEL,
+    resp = generate(
         contents=[
             types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
             _registry_prompt(registry),
